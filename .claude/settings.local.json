@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(lscpu:*)",
+      "Bash(sudo:*)",
+      "Bash(systemctl status:*)",
+      "Bash(systemctl start:*)",
+      "Bash(virsh list:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
