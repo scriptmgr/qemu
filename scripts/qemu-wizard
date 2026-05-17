@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# qemu-wizard -- Interactive KVM/libvirt VM creator with cloud-init
+set -euo pipefail
+
+IMGDIR="/var/lib/libvirt/images"
+
+# -- Preflight ----------------------------------------------------------------
+for cmd in virsh virt-install qemu-img xorriso curl; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "ERROR: '$cmd' is required but not installed." >&2
+    exit 1
+  fi
+done
+
+if ! systemctl is-active --quiet libvirtd; then
+  echo "ERROR: libvirtd is not running. Start it with: systemctl start libvirtd" >&2
+  exit 1
+fi
+
+# -- 1. VM Name ---------------------------------------------------------------
+echo ""
+echo "=== KVM VM Creator ==="
+echo ""
+while true; do
+  read -rp "VM name: " VMNAME
+  VMNAME="${VMNAME// /-}"
+  if [[ -z "$VMNAME" ]]; then
+    echo "  Name cannot be empty."
+  elif virsh dominfo "$VMNAME" &>/dev/null 2>&1; then
+    echo "  '${VMNAME}' is already in use -- pick another name."
+  else
+    break
+  fi
+done
+
+# -- 2. Distro ----------------------------------------------------------------
+echo ""
+echo "Select distro:"
+select DISTRO in "AlmaLinux" "Debian" "Ubuntu"; do
+  [[ -n "$DISTRO" ]] && break
+done
+
+# -- 3. Version ---------------------------------------------------------------
+echo ""
+echo "Select version:"
+case $DISTRO in
+  AlmaLinux)
+    select VERSION in "8" "9"; do
+      [[ -n "$VERSION" ]] && break
+    done
+    case $VERSION in
+      8)
+        OS_VARIANT="almalinux8"
+        BASE_URL="https://repo.almalinux.org/almalinux/8/cloud/x86_64/images"
+        IMGFILE=$(curl -q -LSsf "${BASE_URL}/" \
+          | grep -oE 'AlmaLinux-8-GenericCloud-[0-9.]+-[0-9]+\.x86_64\.qcow2' \
+          | sort -V | tail -1)
+        ;;
+      9)
+        OS_VARIANT="almalinux9"
+        BASE_URL="https://repo.almalinux.org/almalinux/9/cloud/x86_64/images"
+        IMGFILE=$(curl -q -LSsf "${BASE_URL}/" \
+          | grep -oE 'AlmaLinux-9-GenericCloud-[0-9.]+-[0-9]+\.x86_64\.qcow2' \
+          | sort -V | tail -1)
+        ;;
+    esac
+    IMG_URL="${BASE_URL}/${IMGFILE}"
+    ;;
+
+  Debian)
+    select VERSION in "11 (Bullseye)" "12 (Bookworm)"; do
+      [[ -n "$VERSION" ]] && break
+    done
+    case $VERSION in
+      "11"*)
+        OS_VARIANT="debian11"
+        IMGFILE="debian-11-genericcloud-amd64.qcow2"
+        IMG_URL="https://cloud.debian.org/images/cloud/bullseye/latest/${IMGFILE}"
+        ;;
+      "12"*)
+        OS_VARIANT="debian12"
+        IMGFILE="debian-12-genericcloud-amd64.qcow2"
+        IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/${IMGFILE}"
+        ;;
+    esac
+    ;;
+
+  Ubuntu)
+    select VERSION in "20.04 (Focal)" "22.04 (Jammy)" "24.04 (Noble)"; do
+      [[ -n "$VERSION" ]] && break
+    done
+    case $VERSION in
+      "20.04"*)
+        OS_VARIANT="ubuntu20.04"
+        IMGFILE="focal-server-cloudimg-amd64.img"
+        IMG_URL="https://cloud-images.ubuntu.com/focal/current/${IMGFILE}"
+        ;;
+      "22.04"*)
+        OS_VARIANT="ubuntu22.04"
+        IMGFILE="jammy-server-cloudimg-amd64.img"
+        IMG_URL="https://cloud-images.ubuntu.com/jammy/current/${IMGFILE}"
+        ;;
+      "24.04"*)
+        OS_VARIANT="ubuntu24.04"
+        IMGFILE="noble-server-cloudimg-amd64.img"
+        IMG_URL="https://cloud-images.ubuntu.com/noble/current/${IMGFILE}"
+        ;;
+    esac
+    ;;
+esac
+
+# -- 4. VM Specs (vCPU + RAM) -------------------------------------------------
+echo ""
+echo "What specs should the VM have?"
+select SPECS in \
+  "Micro    (1 vCPU,  512MB RAM)" \
+  "Tiny     (1 vCPU,  1GB   RAM)" \
+  "Small    (2 vCPU,  2GB   RAM)" \
+  "Standard (2 vCPU,  4GB   RAM)" \
+  "Medium   (4 vCPU,  4GB   RAM)" \
+  "Large    (4 vCPU,  8GB   RAM)" \
+  "XLarge   (8 vCPU,  8GB   RAM)" \
+  "2XLarge  (8 vCPU,  16GB  RAM)" \
+  "4XLarge  (16 vCPU, 32GB  RAM)" \
+  "Custom"; do
+  case $SPECS in
+    "Micro"*)    VCPUS=1;  RAM=512;   break ;;
+    "Tiny"*)     VCPUS=1;  RAM=1024;  break ;;
+    "Small"*)    VCPUS=2;  RAM=2048;  break ;;
+    "Standard"*) VCPUS=2;  RAM=4096;  break ;;
+    "Medium"*)   VCPUS=4;  RAM=4096;  break ;;
+    "Large"*)    VCPUS=4;  RAM=8192;  break ;;
+    "XLarge"*)   VCPUS=8;  RAM=8192;  break ;;
+    "2XLarge"*)  VCPUS=8;  RAM=16384; break ;;
+    "4XLarge"*)  VCPUS=16; RAM=32768; break ;;
+    "Custom")
+      read -rp "  vCPUs: "    VCPUS
+      read -rp "  RAM (MB): " RAM
+      break ;;
+  esac
+done
+
+# -- 5. Disk Size (always GB) -------------------------------------------------
+echo ""
+echo "Select disk size:"
+select DISKOPT in \
+  "10"   \
+  "20"   \
+  "40"   \
+  "60"   \
+  "80"   \
+  "100"  \
+  "200"  \
+  "500"  \
+  "1000" \
+  "Custom"; do
+  case $DISKOPT in
+    "Custom")
+      read -rp "  Disk size (GB): " DISK
+      DISK="${DISK//[^0-9]/}"
+      break ;;
+    *)
+      DISK="$DISKOPT"
+      break ;;
+  esac
+done
+
+# -- 6. Networking ------------------------------------------------------------
+echo ""
+echo "Which network setup?"
+select NET in \
+  "NAT (default)" \
+  "Bridge (br0)" \
+  "Isolated (no internet)"; do
+  case $NET in
+    "NAT"*)      NETWORK="network=default,model=virtio";  break ;;
+    "Bridge"*)   NETWORK="bridge=br0,model=virtio";       break ;;
+    "Isolated"*) NETWORK="network=isolated,model=virtio"; break ;;
+  esac
+done
+
+# -- Summary + confirm --------------------------------------------------------
+echo ""
+echo "+----------------------------------------------+"
+printf "| %-44s |\n" "VM Summary"
+echo "+----------------------------------------------+"
+printf "| %-14s %-29s |\n" "Name:"      "$VMNAME"
+printf "| %-14s %-29s |\n" "Distro:"    "$DISTRO $VERSION"
+printf "| %-14s %-29s |\n" "vCPUs:"     "$VCPUS"
+printf "| %-14s %-29s |\n" "RAM:"       "${RAM}MB"
+printf "| %-14s %-29s |\n" "Disk:"      "${DISK}GB"
+printf "| %-14s %-29s |\n" "Network:"   "$NET"
+echo "+----------------------------------------------+"
+read -rp "Proceed? [y/N] " CONFIRM
+[[ "${CONFIRM,,}" != "y" ]] && echo "Aborted." && exit 0
+
+# -- Download base image (skip if cached) ------------------------------------
+BASE_IMG="${IMGDIR}/${IMGFILE}"
+if [[ -f "$BASE_IMG" ]]; then
+  echo "Using cached image: ${BASE_IMG}"
+else
+  echo "Downloading ${IMGFILE}..."
+  curl -q -LSsf -o "$BASE_IMG" "$IMG_URL"
+  echo "Done: $(du -h "$BASE_IMG" | cut -f1)"
+fi
+
+# -- Create VM disk (thin overlay) -------------------------------------------
+VM_IMG="${IMGDIR}/${VMNAME}.qcow2"
+qemu-img create -f qcow2 -b "$BASE_IMG" -F qcow2 "$VM_IMG" "${DISK}G"
+
+# -- Cloud-init seed ISO ------------------------------------------------------
+SEED_ISO="${IMGDIR}/${VMNAME}-seed.iso"
+TMPD="$(mktemp -d "${TMPDIR:-/tmp}/scriptmgr-qemu-${VMNAME}-XXXXXX")"
+trap 'rm -rf "$TMPD"' EXIT
+
+cat > "${TMPD}/meta-data" <<EOF
+instance-id: ${VMNAME}
+local-hostname: ${VMNAME}
+EOF
+
+cat > "${TMPD}/user-data" <<'EOF'
+#cloud-config
+chpasswd:
+  list: |
+    root:almalinux
+  expire: false
+ssh_pwauth: true
+disable_root: false
+runcmd:
+  - growpart /dev/vda 1 || growpart /dev/vda 4 || true
+  - xfs_growfs / || resize2fs /dev/vda1 || true
+EOF
+
+xorriso -as mkisofs \
+  -output "$SEED_ISO" \
+  -volid cidata \
+  -joliet -rock \
+  "${TMPD}/user-data" "${TMPD}/meta-data" 2>/dev/null
+
+# -- Create and start VM ------------------------------------------------------
+echo ""
+echo "Creating VM '${VMNAME}'..."
+virt-install \
+  --name        "$VMNAME" \
+  --memory      "$RAM" \
+  --vcpus       "$VCPUS" \
+  --disk        "${VM_IMG},device=disk,bus=virtio" \
+  --disk        "${SEED_ISO},device=cdrom" \
+  --os-variant  "$OS_VARIANT" \
+  --network     "$NETWORK" \
+  --graphics    vnc,listen=127.0.0.1 \
+  --console     pty,target_type=serial \
+  --import \
+  --noautoconsole \
+  --boot        hd
+
+# -- Wait for IP --------------------------------------------------------------
+echo "Waiting for IP address..."
+IP=""
+for i in $(seq 1 30); do
+  IP=$(virsh domifaddr "$VMNAME" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1)
+  [[ -n "$IP" ]] && break
+  sleep 2
+done
+
+echo ""
+echo "+----------------------------------------------+"
+printf "| VM '%-40s' |\n" "${VMNAME} is running"
+echo "+----------------------------------------------+"
+if [[ -n "$IP" ]]; then
+  printf "| %-14s %-29s |\n" "IP:"       "$IP"
+  printf "| %-14s %-29s |\n" "SSH:"      "ssh root@${IP}"
+  printf "| %-14s %-29s |\n" "Password:" "almalinux"
+else
+  printf "| %-14s %-29s |\n" "IP:" "(run: virsh domifaddr ${VMNAME})"
+fi
+printf "| %-14s %-29s |\n" "VNC:"      "virsh vncdisplay ${VMNAME}"
+printf "| %-14s %-29s |\n" "Console:"  "virsh console ${VMNAME}"
+echo "+----------------------------------------------+"
+printf "| %-14s %-29s |\n" "Start:"    "virsh start ${VMNAME}"
+printf "| %-14s %-29s |\n" "Stop:"     "virsh shutdown ${VMNAME}"
+printf "| %-14s %-29s |\n" "Force off:" "virsh destroy ${VMNAME}"
+printf "| %-14s %-29s |\n" "Delete:"   "virsh undefine ${VMNAME} --remove-all-storage"
+echo "+----------------------------------------------+"

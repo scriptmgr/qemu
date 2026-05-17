@@ -150,6 +150,8 @@ __get_packages() {
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES swtpm swtpm-tools"
             # Guest agent, OS info DB, NUMA daemon
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES qemu-guest-agent libosinfo-bin numad"
+            # ISO authoring (used by qemu-wizard)
+            INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES xorriso"
             ;;
         rhel)
             # Core hypervisor
@@ -170,6 +172,8 @@ __get_packages() {
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES cloud-utils genisoimage cloud-init"
             # Software TPM, guest agent, OS info DB, NUMA daemon
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES swtpm swtpm-tools qemu-guest-agent osinfo-db numad"
+            # ISO authoring (used by qemu-wizard)
+            INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES xorriso"
             ;;
         arch)
             # Core hypervisor — qemu-base covers x86_64/i386; qemu-tools adds qemu-img etc.
@@ -186,6 +190,8 @@ __get_packages() {
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES cloud-init cdrtools"
             # Software TPM, guest agent, OS info DB, NUMA daemon
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES swtpm qemu-guest-agent osinfo-db numad"
+            # ISO authoring (used by qemu-wizard)
+            INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES xorriso"
             ;;
         suse)
             # Core hypervisor
@@ -202,6 +208,8 @@ __get_packages() {
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES cloud-utils cloud-init genisoimage"
             # Software TPM, guest agent, OS info library, NUMA daemon
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES swtpm swtpm-tools qemu-guest-agent libosinfo numad"
+            # ISO authoring (used by qemu-wizard)
+            INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES xorriso"
             ;;
         alpine)
             # Core hypervisor
@@ -218,6 +226,8 @@ __get_packages() {
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES cloud-init cloud-utils cdrkit"
             # Software TPM, guest agent, NUMA daemon
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES swtpm qemu-guest-agent numad"
+            # ISO authoring (used by qemu-wizard)
+            INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES xorriso"
             __log_warn "Some packages may not be available in all Alpine channels; ensure 'edge/community' is enabled"
             ;;
     esac
@@ -542,6 +552,7 @@ __main() {
     printf '╚══════════════════════════════════════╝\n'
     printf '\n'
     printf 'Helper commands installed to /usr/local/bin/:\n'
+    printf '  qemu-wizard                                   Interactive VM creator (cloud image + cloud-init)\n'
     printf '  qemu-create-vm <name> <disk-GB> [iso]        Create VM from ISO or PXE\n'
     printf '  qemu-cloudinit-vm <name> <img> <ud> [GB]     Create VM from cloud image\n'
     printf '  qemu-manage list|start|stop|delete|info      VM lifecycle management\n'
