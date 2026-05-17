@@ -666,6 +666,10 @@ __main() {
     printf '  qemu-manage list|start|stop|delete|info    VM lifecycle management\n'
     printf '  virsh                                       Full libvirt CLI\n'
     printf '\n'
+    printf 'To allow a non-root user to manage VMs:\n'
+    printf '  usermod -aG libvirt <username>\n'
+    printf '  (user must log out and back in for the group to take effect)\n'
+    printf '\n'
     printf 'Repository: %s\n' "$INSTALL_SH_REPO_URL"
 }
 
