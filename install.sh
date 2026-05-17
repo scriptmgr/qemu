@@ -168,8 +168,9 @@ __get_packages() {
             else
                 INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES OVMF"
             fi
-            # Cloud-init tooling
-            INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES cloud-utils genisoimage cloud-init"
+            # Cloud-init tooling (cloud-utils is not available on RHEL 9+; use cloud-utils-growpart
+            # for growpart + xorriso for seed ISOs; cloud-localds unavailable on this family)
+            INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES cloud-utils-growpart genisoimage cloud-init"
             # Software TPM, guest agent, OS info DB, NUMA daemon
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES swtpm swtpm-tools qemu-guest-agent osinfo-db numad"
             # ISO authoring (used by qemu-wizard)
@@ -328,6 +329,12 @@ __enable_nested_virtualization() {
 # Install packages
 # ---------------------------------------------------------------------------
 __install_packages() {
+    # Enable EPEL on RHEL-family — required for cloud-utils and swtpm
+    if [ "$INSTALL_SH_DISTRO_FAMILY" = "rhel" ]; then
+        __log_info "Enabling EPEL repository..."
+        $INSTALL_SH_PKG_INSTALL epel-release
+    fi
+
     __log_info "Updating package repositories..."
     # shellcheck disable=SC2086
     eval "$INSTALL_SH_PKG_UPDATE"
@@ -449,8 +456,8 @@ __create_helper_scripts() {
 
     # Extract download_url values — the filename is the last path component
     INSTALL_SH_URLS=$(printf '%s' "$INSTALL_SH_MANIFEST" \
-        | grep -o '"download_url":"[^"]*"' \
-        | sed 's/"download_url":"//;s/"$//')
+        | grep -o '"download_url": *"[^"]*"' \
+        | sed 's/"download_url": *"//;s/"$//')
 
     if [ -z "$INSTALL_SH_URLS" ]; then
         __log_error "No scripts found at $INSTALL_SH_API_URL"
@@ -498,7 +505,7 @@ __verify_installation() {
     if command -v cloud-localds >/dev/null 2>&1; then
         __log_info "cloud-localds available (cloud-init seed ISO creation)"
     else
-        __log_warn "cloud-localds not found — cloud-utils may not have installed correctly"
+        __log_warn "cloud-localds not available on this distro — use qemu-wizard instead (xorriso-based)"
     fi
 
     if command -v swtpm >/dev/null 2>&1; then
