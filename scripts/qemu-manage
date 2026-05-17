@@ -1,0 +1,31 @@
+#!/bin/sh
+# VM lifecycle management helper
+
+case "$1" in
+    list)
+        virsh list --all
+        ;;
+    start)
+        virsh start "$2"
+        ;;
+    stop)
+        virsh shutdown "$2"
+        ;;
+    force-stop)
+        virsh destroy "$2"
+        ;;
+    delete)
+        virsh destroy "$2" 2>/dev/null || true
+        virsh undefine "$2" --remove-all-storage
+        ;;
+    info)
+        virsh dominfo "$2"
+        ;;
+    console)
+        virsh console "$2"
+        ;;
+    *)
+        printf 'Usage: %s {list|start|stop|force-stop|delete|info|console} [vm-name]\n' "$0"
+        exit 1
+        ;;
+esac

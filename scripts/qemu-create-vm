@@ -1,0 +1,54 @@
+#!/bin/sh
+# Create a new KVM VM from an ISO or PXE boot (headless)
+set -e
+
+if [ "$#" -lt 2 ]; then
+    printf 'Usage: %s <vm-name> <disk-size-GB> [iso-path]\n' "$0"
+    printf 'Example: %s debian-srv 20 /var/lib/libvirt/images/debian.iso\n' "$0"
+    exit 1
+fi
+
+VM_NAME="$1"
+DISK_SIZE="$2"
+ISO_PATH="${3:-}"
+IMAGE_DIR="/var/lib/libvirt/images"
+
+# Create disk image
+qemu-img create -f qcow2 "${IMAGE_DIR}/${VM_NAME}.qcow2" "${DISK_SIZE}G"
+
+if [ -n "$ISO_PATH" ]; then
+    virt-install \
+        --name "$VM_NAME" \
+        --memory 2048 \
+        --vcpus 2 \
+        --disk "${IMAGE_DIR}/${VM_NAME}.qcow2" \
+        --cdrom "$ISO_PATH" \
+        --network network=default \
+        --graphics vnc,listen=127.0.0.1 \
+        --console pty,target_type=serial \
+        --boot uefi \
+        --cpu host-passthrough \
+        --features kvm_hidden=on \
+        --os-variant detect=on,require=off \
+        --noautoconsole
+else
+    virt-install \
+        --name "$VM_NAME" \
+        --memory 2048 \
+        --vcpus 2 \
+        --disk "${IMAGE_DIR}/${VM_NAME}.qcow2" \
+        --pxe \
+        --network network=default \
+        --graphics vnc,listen=127.0.0.1 \
+        --console pty,target_type=serial \
+        --boot uefi \
+        --cpu host-passthrough \
+        --features kvm_hidden=on \
+        --os-variant detect=on,require=off \
+        --noautoconsole
+fi
+
+printf 'VM %s created.\n' "$VM_NAME"
+printf '  Serial console : virsh console %s\n' "$VM_NAME"
+printf '  VNC display    : virsh vncdisplay %s\n' "$VM_NAME"
+printf '  SSH tunnel     : ssh -L 5900:127.0.0.1:<port> user@host  then connect VNC to localhost:5900\n'

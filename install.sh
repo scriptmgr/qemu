@@ -424,154 +424,35 @@ NETXML
 }
 
 # ---------------------------------------------------------------------------
-# Helper scripts
+# Helper scripts — fetched from ./scripts/ in the GitHub repo at install time
 # ---------------------------------------------------------------------------
 __create_helper_scripts() {
-    __log_info "Creating helper scripts..."
+    __log_info "Fetching helper scripts from GitHub..."
 
-    # -- qemu-create-vm: create a VM from an ISO or via PXE -------------------
-    cat > /usr/local/bin/qemu-create-vm <<'SCRIPT'
-#!/bin/sh
-# Create a new KVM VM from an ISO or PXE boot (headless)
-set -e
+    local INSTALL_SH_API_URL="https://api.github.com/repos/scriptmgr/qemu/contents/scripts"
+    local INSTALL_SH_MANIFEST INSTALL_SH_URLS INSTALL_SH_URL INSTALL_SH_NAME
 
-if [ "$#" -lt 2 ]; then
-    printf 'Usage: %s <vm-name> <disk-size-GB> [iso-path]\n' "$0"
-    printf 'Example: %s debian-srv 20 /var/lib/libvirt/images/debian.iso\n' "$0"
-    exit 1
-fi
-
-VM_NAME="$1"
-DISK_SIZE="$2"
-ISO_PATH="${3:-}"
-IMAGE_DIR="/var/lib/libvirt/images"
-
-# Create disk image
-qemu-img create -f qcow2 "${IMAGE_DIR}/${VM_NAME}.qcow2" "${DISK_SIZE}G"
-
-if [ -n "$ISO_PATH" ]; then
-    virt-install \
-        --name "$VM_NAME" \
-        --memory 2048 \
-        --vcpus 2 \
-        --disk "${IMAGE_DIR}/${VM_NAME}.qcow2" \
-        --cdrom "$ISO_PATH" \
-        --network network=default \
-        --graphics vnc,listen=127.0.0.1 \
-        --console pty,target_type=serial \
-        --boot uefi \
-        --cpu host-passthrough \
-        --features kvm_hidden=on \
-        --os-variant detect=on,require=off \
-        --noautoconsole
-else
-    virt-install \
-        --name "$VM_NAME" \
-        --memory 2048 \
-        --vcpus 2 \
-        --disk "${IMAGE_DIR}/${VM_NAME}.qcow2" \
-        --pxe \
-        --network network=default \
-        --graphics vnc,listen=127.0.0.1 \
-        --console pty,target_type=serial \
-        --boot uefi \
-        --cpu host-passthrough \
-        --features kvm_hidden=on \
-        --os-variant detect=on,require=off \
-        --noautoconsole
-fi
-
-printf 'VM %s created.\n' "$VM_NAME"
-printf '  Serial console : virsh console %s\n' "$VM_NAME"
-printf '  VNC display    : virsh vncdisplay %s\n' "$VM_NAME"
-printf '  SSH tunnel     : ssh -L 5900:127.0.0.1:<port> user@host  then connect VNC to localhost:5900\n'
-SCRIPT
-    chmod +x /usr/local/bin/qemu-create-vm
-
-    # -- qemu-cloudinit-vm: create a VM from a cloud image with cloud-init ----
-    cat > /usr/local/bin/qemu-cloudinit-vm <<'SCRIPT'
-#!/bin/sh
-# Create a KVM VM from a cloud image (qcow2) with a cloud-init NoCloud seed ISO
-set -e
-
-if [ "$#" -lt 3 ]; then
-    printf 'Usage: %s <vm-name> <base-image.qcow2> <userdata.yaml> [disk-size-GB]\n' "$0"
-    printf 'Example: %s web01 /var/lib/libvirt/images/ubuntu-22.04.qcow2 userdata.yaml 20\n' "$0"
-    exit 1
-fi
-
-VM_NAME="$1"
-BASE_IMAGE="$2"
-USERDATA="$3"
-DISK_SIZE="${4:-20}"
-IMAGE_DIR="/var/lib/libvirt/images"
-VM_DISK="${IMAGE_DIR}/${VM_NAME}.qcow2"
-SEED_ISO="${IMAGE_DIR}/${VM_NAME}-seed.iso"
-
-# Create a thin-provisioned overlay on top of the base image
-qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$VM_DISK" "${DISK_SIZE}G"
-
-# Build the NoCloud seed ISO (requires cloud-utils)
-cloud-localds "$SEED_ISO" "$USERDATA"
-
-virt-install \
-    --name "$VM_NAME" \
-    --memory 2048 \
-    --vcpus 2 \
-    --disk "$VM_DISK" \
-    --disk "${SEED_ISO},device=cdrom,readonly=on" \
-    --network network=default \
-    --graphics vnc,listen=127.0.0.1 \
-    --console pty,target_type=serial \
-    --boot uefi \
-    --cpu host-passthrough \
-    --os-variant detect=on,require=off \
-    --import \
-    --noautoconsole
-
-printf 'VM %s created.\n' "$VM_NAME"
-printf '  Serial console : virsh console %s\n' "$VM_NAME"
-printf '  VNC display    : virsh vncdisplay %s\n' "$VM_NAME"
-printf '  SSH tunnel     : ssh -L 5900:127.0.0.1:<port> user@host  then connect VNC to localhost:5900\n'
-printf '  Remove seed ISO after first boot: virsh change-media %s sda --eject\n' "$VM_NAME"
-SCRIPT
-    chmod +x /usr/local/bin/qemu-cloudinit-vm
-
-    # -- qemu-manage: lifecycle management ------------------------------------
-    cat > /usr/local/bin/qemu-manage <<'SCRIPT'
-#!/bin/sh
-# VM lifecycle management helper
-
-case "$1" in
-    list)
-        virsh list --all
-        ;;
-    start)
-        virsh start "$2"
-        ;;
-    stop)
-        virsh shutdown "$2"
-        ;;
-    force-stop)
-        virsh destroy "$2"
-        ;;
-    delete)
-        virsh destroy "$2" 2>/dev/null || true
-        virsh undefine "$2" --remove-all-storage
-        ;;
-    info)
-        virsh dominfo "$2"
-        ;;
-    console)
-        virsh console "$2"
-        ;;
-    *)
-        printf 'Usage: %s {list|start|stop|force-stop|delete|info|console} [vm-name]\n' "$0"
+    INSTALL_SH_MANIFEST=$(curl -q -LSsf "$INSTALL_SH_API_URL") || {
+        __log_error "Failed to fetch script list from $INSTALL_SH_API_URL"
         exit 1
-        ;;
-esac
-SCRIPT
-    chmod +x /usr/local/bin/qemu-manage
+    }
+
+    # Extract download_url values — the filename is the last path component
+    INSTALL_SH_URLS=$(printf '%s' "$INSTALL_SH_MANIFEST" \
+        | grep -o '"download_url":"[^"]*"' \
+        | sed 's/"download_url":"//;s/"$//')
+
+    if [ -z "$INSTALL_SH_URLS" ]; then
+        __log_error "No scripts found at $INSTALL_SH_API_URL"
+        exit 1
+    fi
+
+    for INSTALL_SH_URL in $INSTALL_SH_URLS; do
+        INSTALL_SH_NAME=$(printf '%s' "$INSTALL_SH_URL" | sed 's|.*/||')
+        __log_info "Installing $INSTALL_SH_NAME..."
+        curl -q -LSsf -o "/usr/local/bin/${INSTALL_SH_NAME}" "$INSTALL_SH_URL"
+        chmod +x "/usr/local/bin/${INSTALL_SH_NAME}"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -660,11 +541,11 @@ __main() {
     printf '║  Installation Complete               ║\n'
     printf '╚══════════════════════════════════════╝\n'
     printf '\n'
-    printf 'Helper commands installed:\n'
-    printf '  qemu-create-vm <name> <disk-GB> [iso]      Create VM from ISO or PXE\n'
-    printf '  qemu-cloudinit-vm <name> <img> <ud> [GB]   Create VM from cloud image\n'
-    printf '  qemu-manage list|start|stop|delete|info    VM lifecycle management\n'
-    printf '  virsh                                       Full libvirt CLI\n'
+    printf 'Helper commands installed to /usr/local/bin/:\n'
+    printf '  qemu-create-vm <name> <disk-GB> [iso]        Create VM from ISO or PXE\n'
+    printf '  qemu-cloudinit-vm <name> <img> <ud> [GB]     Create VM from cloud image\n'
+    printf '  qemu-manage list|start|stop|delete|info      VM lifecycle management\n'
+    printf '  virsh                                         Full libvirt CLI\n'
     printf '\n'
     printf 'To allow a non-root user to manage VMs:\n'
     printf '  usermod -aG libvirt <username>\n'

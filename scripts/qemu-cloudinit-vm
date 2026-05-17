@@ -1,0 +1,44 @@
+#!/bin/sh
+# Create a KVM VM from a cloud image (qcow2) with a cloud-init NoCloud seed ISO
+set -e
+
+if [ "$#" -lt 3 ]; then
+    printf 'Usage: %s <vm-name> <base-image.qcow2> <userdata.yaml> [disk-size-GB]\n' "$0"
+    printf 'Example: %s web01 /var/lib/libvirt/images/ubuntu-22.04.qcow2 userdata.yaml 20\n' "$0"
+    exit 1
+fi
+
+VM_NAME="$1"
+BASE_IMAGE="$2"
+USERDATA="$3"
+DISK_SIZE="${4:-20}"
+IMAGE_DIR="/var/lib/libvirt/images"
+VM_DISK="${IMAGE_DIR}/${VM_NAME}.qcow2"
+SEED_ISO="${IMAGE_DIR}/${VM_NAME}-seed.iso"
+
+# Create a thin-provisioned overlay on top of the base image
+qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$VM_DISK" "${DISK_SIZE}G"
+
+# Build the NoCloud seed ISO (requires cloud-utils)
+cloud-localds "$SEED_ISO" "$USERDATA"
+
+virt-install \
+    --name "$VM_NAME" \
+    --memory 2048 \
+    --vcpus 2 \
+    --disk "$VM_DISK" \
+    --disk "${SEED_ISO},device=cdrom,readonly=on" \
+    --network network=default \
+    --graphics vnc,listen=127.0.0.1 \
+    --console pty,target_type=serial \
+    --boot uefi \
+    --cpu host-passthrough \
+    --os-variant detect=on,require=off \
+    --import \
+    --noautoconsole
+
+printf 'VM %s created.\n' "$VM_NAME"
+printf '  Serial console : virsh console %s\n' "$VM_NAME"
+printf '  VNC display    : virsh vncdisplay %s\n' "$VM_NAME"
+printf '  SSH tunnel     : ssh -L 5900:127.0.0.1:<port> user@host  then connect VNC to localhost:5900\n'
+printf '  Remove seed ISO after first boot: virsh change-media %s sda --eject\n' "$VM_NAME"
