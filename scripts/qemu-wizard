@@ -254,6 +254,30 @@ case "$MENU_RESULT" in
     Isolated*) QEMU_WIZARD_NETWORK="network=isolated,model=virtio" ;;
 esac
 
+# ── 7. Root password ─────────────────────────────────────────────────────
+
+__menu "Root password" \
+    "Enter a password" \
+    "Generate random (10 chars)"
+
+if [[ "$MENU_IDX" -eq 1 ]]; then
+    QEMU_WIZARD_PASS=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 10)
+    printf '  Generated: %s\n' "$QEMU_WIZARD_PASS"
+else
+    while true; do
+        read -rsp "  Password: " QEMU_WIZARD_PASS; printf '\n'
+        if [[ -z "$QEMU_WIZARD_PASS" ]]; then
+            printf '  Password cannot be empty.\n'
+            continue
+        fi
+        read -rsp "  Confirm:  " QEMU_WIZARD_PASS2; printf '\n'
+        if [[ "$QEMU_WIZARD_PASS" == "$QEMU_WIZARD_PASS2" ]]; then
+            break
+        fi
+        printf '  Passwords do not match — try again.\n'
+    done
+fi
+
 # ── Summary + confirm ─────────────────────────────────────────────────────
 
 printf '\n'
@@ -266,6 +290,7 @@ __row "Arch       : ${QEMU_WIZARD_ARCH}"
 __row "Specs      : ${QEMU_WIZARD_SPECS_LABEL}  (${QEMU_WIZARD_VCPUS} vCPU, ${QEMU_WIZARD_RAM} MB)"
 __row "Disk       : ${QEMU_WIZARD_DISK} GB"
 __row "Network    : ${QEMU_WIZARD_NET_LABEL}"
+__row "Password   : ${QEMU_WIZARD_PASS}"
 __bot
 printf '\n'
 read -rp "Proceed? [y/N] " QEMU_WIZARD_CONFIRM
@@ -301,11 +326,11 @@ instance-id: ${QEMU_WIZARD_VMNAME}
 local-hostname: ${QEMU_WIZARD_VMNAME}
 EOF
 
-cat > "${QEMU_WIZARD_TMPD}/user-data" <<'CLOUDINIT'
+cat > "${QEMU_WIZARD_TMPD}/user-data" <<CLOUDINIT
 #cloud-config
 chpasswd:
   list: |
-    root:changeme
+    root:${QEMU_WIZARD_PASS}
   expire: false
 ssh_pwauth: true
 disable_root: false
@@ -355,17 +380,19 @@ printf '\n'
 
 printf '\n'
 __top
-__row "VM \"${QEMU_WIZARD_VMNAME}\" is running"
+__row "Virtual Machine Ready"
 __mid
+__row "Virtual Machine Name : ${QEMU_WIZARD_VMNAME}"
+__row "Virtual Machine User : root"
+__row "Virtual Machine Pass : ${QEMU_WIZARD_PASS}"
 if [[ -n "$QEMU_WIZARD_IP" ]]; then
-    __row "IP         : ${QEMU_WIZARD_IP}"
-    __row "SSH        : ssh root@${QEMU_WIZARD_IP}"
-    __row "Password   : changeme"
+    __row "Virtual Machine IPv4 : ${QEMU_WIZARD_IP}"
+    __row "SSH Connect          : ssh root@${QEMU_WIZARD_IP}"
 else
-    __row "IP         : (run: virsh domifaddr ${QEMU_WIZARD_VMNAME})"
+    __row "Virtual Machine IPv4 : (run: virsh domifaddr ${QEMU_WIZARD_VMNAME})"
 fi
-__row "VNC        : virsh vncdisplay ${QEMU_WIZARD_VMNAME}"
-__row "Console    : virsh console ${QEMU_WIZARD_VMNAME}"
+__row "VNC Display          : virsh vncdisplay ${QEMU_WIZARD_VMNAME}"
+__row "Serial Console       : virsh console ${QEMU_WIZARD_VMNAME}"
 __mid
 __row "Start      : virsh start ${QEMU_WIZARD_VMNAME}"
 __row "Stop       : virsh shutdown ${QEMU_WIZARD_VMNAME}"
