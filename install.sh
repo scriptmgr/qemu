@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # QEMU+Libvirt Virtualization Environment Installer
 # Repository: github.com/scriptmgr/qemu
 # POSIX-compliant script for multi-distro, headless server deployments
@@ -34,6 +34,7 @@ INSTALL_SH_PKG_UPDATE=""
 INSTALL_SH_PKG_INSTALL=""
 INSTALL_SH_PACKAGES=""
 INSTALL_SH_CPU_VENDOR="unknown"
+INSTALL_SH_ARCH="$(uname -m)"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -133,8 +134,12 @@ __detect_distro() {
 __get_packages() {
     case "$INSTALL_SH_DISTRO_FAMILY" in
         debian)
-            # Core hypervisor
-            INSTALL_SH_PACKAGES="qemu-system-x86 qemu-kvm qemu-utils qemu-block-extra"
+            # Core hypervisor — arch-dependent
+            if [ "$INSTALL_SH_ARCH" = "aarch64" ] || [ "$INSTALL_SH_ARCH" = "arm64" ]; then
+                INSTALL_SH_PACKAGES="qemu-system-arm qemu-utils qemu-block-extra"
+            else
+                INSTALL_SH_PACKAGES="qemu-system-x86 qemu-kvm qemu-utils qemu-block-extra"
+            fi
             # Libvirt daemon + CLI
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES libvirt-daemon libvirt-daemon-system"
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES libvirt-clients libvirt-daemon-driver-qemu"
@@ -213,8 +218,12 @@ __get_packages() {
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES xorriso"
             ;;
         alpine)
-            # Core hypervisor
-            INSTALL_SH_PACKAGES="qemu-system-x86_64 qemu-img"
+            # Core hypervisor — arch-dependent
+            if [ "$INSTALL_SH_ARCH" = "aarch64" ]; then
+                INSTALL_SH_PACKAGES="qemu-system-aarch64 qemu-img"
+            else
+                INSTALL_SH_PACKAGES="qemu-system-x86_64 qemu-img"
+            fi
             # Libvirt daemon + CLI
             INSTALL_SH_PACKAGES="$INSTALL_SH_PACKAGES libvirt libvirt-daemon libvirt-client"
             # Networking (cdrkit provides genisoimage on Alpine)
@@ -238,25 +247,45 @@ __get_packages() {
 # CPU virtualization support check
 # ---------------------------------------------------------------------------
 __check_virtualization() {
-    __log_info "Checking CPU virtualization support..."
+    __log_info "Checking CPU virtualization support (arch: ${INSTALL_SH_ARCH})..."
 
-    if [ -f /proc/cpuinfo ]; then
-        if grep -qE -- '(vmx|svm)' /proc/cpuinfo; then
-            if grep -qE -- 'vmx' /proc/cpuinfo; then
-                __log_info "Intel VT-x detected"
-                INSTALL_SH_CPU_VENDOR="intel"
+    case "$INSTALL_SH_ARCH" in
+        aarch64|arm64)
+            # On 64-bit ARM, KVM runs at EL2 — no vmx/svm flags in /proc/cpuinfo.
+            # Presence of /dev/kvm confirms the host kernel has KVM enabled.
+            __log_info "ARM64 architecture detected — KVM uses hardware EL2 virtualisation"
+            INSTALL_SH_CPU_VENDOR="arm"
+            ;;
+        x86_64|i?86)
+            if [ -f /proc/cpuinfo ]; then
+                if grep -q -- 'vmx' /proc/cpuinfo; then
+                    __log_info "Intel VT-x detected"
+                    INSTALL_SH_CPU_VENDOR="intel"
+                elif grep -q -- 'svm' /proc/cpuinfo; then
+                    __log_info "AMD-V detected"
+                    INSTALL_SH_CPU_VENDOR="amd"
+                else
+                    __log_error "CPU does not support hardware virtualization (no vmx/svm in /proc/cpuinfo)"
+                    __log_error "Enable VT-x/AMD-V in BIOS/UEFI settings and retry"
+                    exit 1
+                fi
             else
-                __log_info "AMD-V detected"
-                INSTALL_SH_CPU_VENDOR="amd"
+                __log_warn "Cannot read /proc/cpuinfo — skipping CPU flag check"
+                INSTALL_SH_CPU_VENDOR="unknown"
             fi
-        else
-            __log_error "CPU does not support hardware virtualization (no vmx/svm in /proc/cpuinfo)"
-            __log_error "Enable VT-x/AMD-V in BIOS/UEFI settings and retry"
-            exit 1
-        fi
+            ;;
+        *)
+            __log_warn "Unknown architecture ${INSTALL_SH_ARCH} — skipping CPU flag check"
+            INSTALL_SH_CPU_VENDOR="unknown"
+            ;;
+    esac
+
+    # Verify /dev/kvm is accessible regardless of architecture
+    if [ -c /dev/kvm ]; then
+        __log_info "/dev/kvm present — hardware KVM acceleration available"
     else
-        __log_warn "Cannot read /proc/cpuinfo — skipping virtualization check"
-        INSTALL_SH_CPU_VENDOR="unknown"
+        __log_warn "/dev/kvm not found — KVM acceleration unavailable"
+        __log_warn "Ensure kvm/kvm_intel/kvm_amd modules are loaded and VT-x/AMD-V/EL2 is enabled"
     fi
 }
 
@@ -266,6 +295,11 @@ __check_virtualization() {
 __enable_nested_virtualization() {
     if [ "$INSTALL_SH_CPU_VENDOR" = "unknown" ]; then
         __log_warn "CPU vendor unknown — skipping nested virtualization setup"
+        return
+    fi
+
+    if [ "$INSTALL_SH_CPU_VENDOR" = "arm" ]; then
+        __log_info "ARM64: nested virtualization is managed by the firmware/hypervisor — skipping module config"
         return
     fi
 
@@ -297,7 +331,7 @@ __enable_nested_virtualization() {
     if lsmod | grep -q -- "^${INSTALL_SH_MODULE}"; then
         __log_info "KVM module already loaded"
         if [ -f "$INSTALL_SH_NESTED_FILE" ]; then
-            INSTALL_SH_NESTED_STATUS=$(cat "$INSTALL_SH_NESTED_FILE")
+            read -r INSTALL_SH_NESTED_STATUS < "$INSTALL_SH_NESTED_FILE" || true
             if [ "$INSTALL_SH_NESTED_STATUS" = "Y" ] || [ "$INSTALL_SH_NESTED_STATUS" = "1" ]; then
                 __log_info "Nested virtualization already enabled"
             else
@@ -318,7 +352,7 @@ __enable_nested_virtualization() {
 
     # Verify
     if [ -f "$INSTALL_SH_NESTED_FILE" ]; then
-        INSTALL_SH_NESTED_STATUS=$(cat "$INSTALL_SH_NESTED_FILE")
+        read -r INSTALL_SH_NESTED_STATUS < "$INSTALL_SH_NESTED_FILE" || true
         if [ "$INSTALL_SH_NESTED_STATUS" = "Y" ] || [ "$INSTALL_SH_NESTED_STATUS" = "1" ]; then
             __log_info "Nested virtualization enabled for ${INSTALL_SH_CPU_VENDOR}"
         fi
@@ -370,6 +404,21 @@ __install_packages() {
             rc-service libvirtd start
             ;;
     esac
+
+    # Fix 5: verify libvirtd is actually running before proceeding to virsh calls
+    __log_info "Waiting for libvirtd to become active..."
+    local INSTALL_SH_RETRY=0
+    while [ "$INSTALL_SH_RETRY" -lt 10 ]; do
+        if systemctl is-active --quiet libvirtd 2>/dev/null \
+            || rc-service libvirtd status >/dev/null 2>&1; then
+            __log_info "libvirtd is running"
+            return
+        fi
+        INSTALL_SH_RETRY=$((INSTALL_SH_RETRY + 1))
+        sleep 1
+    done
+    __log_error "libvirtd failed to start — check: journalctl -u libvirtd"
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -429,6 +478,42 @@ NETXML
         virsh net-start default 2>/dev/null || true
     fi
 
+    # Isolated (host-only) network — no <forward> means no NAT/routing to outside
+    __log_info "Configuring isolated libvirt network..."
+    if virsh net-list --all | grep -q -- "isolated"; then
+        __log_info "Isolated network already exists — ensuring it is active and set to autostart"
+        virsh net-autostart isolated 2>/dev/null || true
+        if ! virsh net-list | grep -q -- "isolated.*active"; then
+            virsh net-start isolated 2>/dev/null || true
+        fi
+    else
+        virsh net-define /dev/stdin <<'ISONETXML'
+<network>
+  <name>isolated</name>
+  <bridge name='virbr1' stp='on' delay='0'/>
+  <mac address='52:54:00:61:71:81'/>
+  <ip address='192.168.200.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.200.2' end='192.168.200.254'/>
+    </dhcp>
+  </ip>
+</network>
+ISONETXML
+        virsh net-autostart isolated 2>/dev/null || true
+        virsh net-start isolated 2>/dev/null || true
+    fi
+
+    # Fix 4: IP forwarding — required for NAT (default network) to work
+    __log_info "Enabling IPv4 forwarding..."
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    local INSTALL_SH_SYSCTL_CONF="/etc/sysctl.d/90-libvirt-ip-forward.conf"
+    if [ ! -f "$INSTALL_SH_SYSCTL_CONF" ]; then
+        printf 'net.ipv4.ip_forward = 1\n' > "$INSTALL_SH_SYSCTL_CONF"
+        __log_info "Persisted net.ipv4.ip_forward=1 to ${INSTALL_SH_SYSCTL_CONF}"
+    else
+        __log_info "IP forwarding sysctl already persisted"
+    fi
+
     # Restart libvirt only if the config was modified this run
     if [ "${INSTALL_SH_CONF_CHANGED:-0}" = "1" ]; then
         __log_info "Restarting libvirt service to apply config changes..."
@@ -442,6 +527,31 @@ NETXML
         esac
     else
         __log_info "libvirt config unchanged — skipping restart"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Storage pool — default pool at /var/lib/libvirt/images
+# ---------------------------------------------------------------------------
+__configure_storage_pool() {
+    __log_info "Configuring default storage pool..."
+
+    local INSTALL_SH_POOL_DIR="/var/lib/libvirt/images"
+    mkdir -p "$INSTALL_SH_POOL_DIR"
+
+    if virsh pool-list --all | grep -q -- "default"; then
+        __log_info "Default storage pool already exists — ensuring it is active and set to autostart"
+        virsh pool-autostart default 2>/dev/null || true
+        if ! virsh pool-list | grep -q -- "default.*active"; then
+            virsh pool-start default 2>/dev/null || true
+        fi
+    else
+        __log_info "Defining default storage pool at ${INSTALL_SH_POOL_DIR}..."
+        virsh pool-define-as default dir --target "$INSTALL_SH_POOL_DIR"
+        virsh pool-build default
+        virsh pool-start default
+        virsh pool-autostart default
+        __log_info "Default storage pool created and started"
     fi
 }
 
@@ -461,7 +571,7 @@ __create_helper_scripts() {
 
     # Extract download_url values — the filename is the last path component
     INSTALL_SH_URLS=$(printf '%s' "$INSTALL_SH_MANIFEST" \
-        | grep -o '"download_url": *"[^"]*"' \
+        | grep -o -- '"download_url": *"[^"]*"' \
         | sed 's/"download_url": *"//;s/"$//')
 
     if [ -z "$INSTALL_SH_URLS" ]; then
@@ -470,7 +580,7 @@ __create_helper_scripts() {
     fi
 
     for INSTALL_SH_URL in $INSTALL_SH_URLS; do
-        INSTALL_SH_NAME=$(printf '%s' "$INSTALL_SH_URL" | sed 's|.*/||')
+        INSTALL_SH_NAME="${INSTALL_SH_URL##*/}"
         __log_info "Installing $INSTALL_SH_NAME..."
         curl -q -LSsf -o "/usr/local/bin/${INSTALL_SH_NAME}" "$INSTALL_SH_URL"
         chmod +x "/usr/local/bin/${INSTALL_SH_NAME}"
@@ -495,10 +605,11 @@ __verify_installation() {
         __log_error "libvirtd service not running"
     fi
 
-    if command -v qemu-system-x86_64 >/dev/null 2>&1; then
-        __log_info "QEMU installed: $(qemu-system-x86_64 --version | head -n 1)"
+    local INSTALL_SH_QEMU_BIN="qemu-system-${INSTALL_SH_ARCH}"
+    if command -v "$INSTALL_SH_QEMU_BIN" >/dev/null 2>&1; then
+        __log_info "QEMU installed: $("$INSTALL_SH_QEMU_BIN" --version | head -n 1)"
     else
-        __log_error "qemu-system-x86_64 not found"
+        __log_error "${INSTALL_SH_QEMU_BIN} not found"
     fi
 
     if command -v virsh >/dev/null 2>&1; then
@@ -522,7 +633,7 @@ __verify_installation() {
     if [ "$INSTALL_SH_CPU_VENDOR" = "intel" ]; then
         if [ -f /sys/module/kvm_intel/parameters/nested ]; then
             local INSTALL_SH_NESTED
-            INSTALL_SH_NESTED=$(cat /sys/module/kvm_intel/parameters/nested)
+            read -r INSTALL_SH_NESTED < /sys/module/kvm_intel/parameters/nested || true
             if [ "$INSTALL_SH_NESTED" = "Y" ] || [ "$INSTALL_SH_NESTED" = "1" ]; then
                 __log_info "Nested virtualization enabled (Intel)"
             fi
@@ -530,7 +641,7 @@ __verify_installation() {
     elif [ "$INSTALL_SH_CPU_VENDOR" = "amd" ]; then
         if [ -f /sys/module/kvm_amd/parameters/nested ]; then
             local INSTALL_SH_NESTED
-            INSTALL_SH_NESTED=$(cat /sys/module/kvm_amd/parameters/nested)
+            read -r INSTALL_SH_NESTED < /sys/module/kvm_amd/parameters/nested || true
             if [ "$INSTALL_SH_NESTED" = "1" ]; then
                 __log_info "Nested virtualization enabled (AMD)"
             fi
@@ -555,6 +666,7 @@ __main() {
     __install_packages
     __enable_nested_virtualization
     __configure_libvirt
+    __configure_storage_pool
     __create_helper_scripts
     __verify_installation
 
