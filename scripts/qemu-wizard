@@ -1,284 +1,375 @@
 #!/usr/bin/env bash
-# qemu-wizard -- Interactive KVM/libvirt VM creator with cloud-init
+# qemu-wizard -- Interactive KVM/QEMU VM creator (cloud-init, multi-arch)
+# @@Version: 202605170000-git
 set -euo pipefail
 
-IMGDIR="/var/lib/libvirt/images"
+# Image storage directory
+QEMU_WIZARD_IMGDIR="/var/lib/libvirt/images"
 
-# -- Preflight ----------------------------------------------------------------
-for cmd in virsh virt-install qemu-img xorriso curl; do
-  if ! command -v "$cmd" &>/dev/null; then
-    echo "ERROR: '$cmd' is required but not installed." >&2
-    exit 1
-  fi
-done
+# Host architecture — used to select native-arch cloud images
+QEMU_WIZARD_ARCH="$(uname -m)"
 
-if ! systemctl is-active --quiet libvirtd; then
-  echo "ERROR: libvirtd is not running. Start it with: systemctl start libvirtd" >&2
-  exit 1
-fi
-
-# -- 1. VM Name ---------------------------------------------------------------
-echo ""
-echo "=== KVM VM Creator ==="
-echo ""
-while true; do
-  read -rp "VM name: " VMNAME
-  VMNAME="${VMNAME// /-}"
-  if [[ -z "$VMNAME" ]]; then
-    echo "  Name cannot be empty."
-  elif virsh dominfo "$VMNAME" &>/dev/null 2>&1; then
-    echo "  '${VMNAME}' is already in use -- pick another name."
-  else
-    break
-  fi
-done
-
-# -- 2. Distro ----------------------------------------------------------------
-echo ""
-echo "Select distro:"
-select DISTRO in "AlmaLinux" "Debian" "Ubuntu"; do
-  [[ -n "$DISTRO" ]] && break
-done
-
-# -- 3. Version ---------------------------------------------------------------
-echo ""
-echo "Select version:"
-case $DISTRO in
-  AlmaLinux)
-    select VERSION in "8" "9"; do
-      [[ -n "$VERSION" ]] && break
-    done
-    case $VERSION in
-      8)
-        OS_VARIANT="almalinux8"
-        BASE_URL="https://repo.almalinux.org/almalinux/8/cloud/x86_64/images"
-        IMGFILE=$(curl -q -LSsf "${BASE_URL}/" \
-          | grep -oE 'AlmaLinux-8-GenericCloud-[0-9.]+-[0-9]+\.x86_64\.qcow2' \
-          | sort -V | tail -1)
-        ;;
-      9)
-        OS_VARIANT="almalinux9"
-        BASE_URL="https://repo.almalinux.org/almalinux/9/cloud/x86_64/images"
-        IMGFILE=$(curl -q -LSsf "${BASE_URL}/" \
-          | grep -oE 'AlmaLinux-9-GenericCloud-[0-9.]+-[0-9]+\.x86_64\.qcow2' \
-          | sort -V | tail -1)
-        ;;
-    esac
-    IMG_URL="${BASE_URL}/${IMGFILE}"
-    ;;
-
-  Debian)
-    select VERSION in "11 (Bullseye)" "12 (Bookworm)"; do
-      [[ -n "$VERSION" ]] && break
-    done
-    case $VERSION in
-      "11"*)
-        OS_VARIANT="debian11"
-        IMGFILE="debian-11-genericcloud-amd64.qcow2"
-        IMG_URL="https://cloud.debian.org/images/cloud/bullseye/latest/${IMGFILE}"
-        ;;
-      "12"*)
-        OS_VARIANT="debian12"
-        IMGFILE="debian-12-genericcloud-amd64.qcow2"
-        IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/${IMGFILE}"
-        ;;
-    esac
-    ;;
-
-  Ubuntu)
-    select VERSION in "20.04 (Focal)" "22.04 (Jammy)" "24.04 (Noble)"; do
-      [[ -n "$VERSION" ]] && break
-    done
-    case $VERSION in
-      "20.04"*)
-        OS_VARIANT="ubuntu20.04"
-        IMGFILE="focal-server-cloudimg-amd64.img"
-        IMG_URL="https://cloud-images.ubuntu.com/focal/current/${IMGFILE}"
-        ;;
-      "22.04"*)
-        OS_VARIANT="ubuntu22.04"
-        IMGFILE="jammy-server-cloudimg-amd64.img"
-        IMG_URL="https://cloud-images.ubuntu.com/jammy/current/${IMGFILE}"
-        ;;
-      "24.04"*)
-        OS_VARIANT="ubuntu24.04"
-        IMGFILE="noble-server-cloudimg-amd64.img"
-        IMG_URL="https://cloud-images.ubuntu.com/noble/current/${IMGFILE}"
-        ;;
-    esac
-    ;;
+# Map host arch to cloud image arch suffix used by Debian/Ubuntu
+case "$QEMU_WIZARD_ARCH" in
+    x86_64)  QEMU_WIZARD_CLOUD_ARCH="amd64" ;;
+    aarch64) QEMU_WIZARD_CLOUD_ARCH="arm64" ;;
+    *)       QEMU_WIZARD_CLOUD_ARCH="$QEMU_WIZARD_ARCH" ;;
 esac
 
-# -- 4. VM Specs (vCPU + RAM) -------------------------------------------------
-echo ""
-echo "What specs should the VM have?"
-select SPECS in \
-  "Micro    (1 vCPU,  512MB RAM)" \
-  "Tiny     (1 vCPU,  1GB   RAM)" \
-  "Small    (2 vCPU,  2GB   RAM)" \
-  "Standard (2 vCPU,  4GB   RAM)" \
-  "Medium   (4 vCPU,  4GB   RAM)" \
-  "Large    (4 vCPU,  8GB   RAM)" \
-  "XLarge   (8 vCPU,  8GB   RAM)" \
-  "2XLarge  (8 vCPU,  16GB  RAM)" \
-  "4XLarge  (16 vCPU, 32GB  RAM)" \
-  "Custom"; do
-  case $SPECS in
-    "Micro"*)    VCPUS=1;  RAM=512;   break ;;
-    "Tiny"*)     VCPUS=1;  RAM=1024;  break ;;
-    "Small"*)    VCPUS=2;  RAM=2048;  break ;;
-    "Standard"*) VCPUS=2;  RAM=4096;  break ;;
-    "Medium"*)   VCPUS=4;  RAM=4096;  break ;;
-    "Large"*)    VCPUS=4;  RAM=8192;  break ;;
-    "XLarge"*)   VCPUS=8;  RAM=8192;  break ;;
-    "2XLarge"*)  VCPUS=8;  RAM=16384; break ;;
-    "4XLarge"*)  VCPUS=16; RAM=32768; break ;;
-    "Custom")
-      read -rp "  vCPUs: "    VCPUS
-      read -rp "  RAM (MB): " RAM
-      break ;;
-  esac
+# Box/menu width in characters
+QEMU_WIZARD_W=56
+
+# ── Box-drawing helpers ───────────────────────────────────────────────────
+
+__hline() {
+    local i
+    for ((i = 0; i < QEMU_WIZARD_W - 2; i++)); do printf '─'; done
+}
+
+__top() { printf '┌'; __hline; printf '┐\n'; }
+__mid() { printf '├'; __hline; printf '┤\n'; }
+__bot() { printf '└'; __hline; printf '┘\n'; }
+
+__row() {
+    printf '│  %-*s│\n' $((QEMU_WIZARD_W - 4)) "$*"
+}
+
+# ── Interactive menu ──────────────────────────────────────────────────────
+# Usage: __menu "Title" "option1" "option2" ...
+# Sets MENU_RESULT (full option text) and MENU_IDX (0-based index)
+__menu() {
+    local title="$1"; shift
+    local -a opts=("$@")
+    local n="${#opts[@]}" i
+
+    printf '\n'
+    __top; __row "$title"; __mid
+    for i in "${!opts[@]}"; do
+        printf '│  %2d)  %-*s│\n' "$((i + 1))" $((QEMU_WIZARD_W - 9)) "${opts[$i]}"
+    done
+    __bot
+
+    local choice
+    while true; do
+        read -rp "  Choice [1-${n}]: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+            MENU_RESULT="${opts[$((choice - 1))]}"
+            MENU_IDX=$((choice - 1))
+            return 0
+        fi
+        printf '  Please enter a number between 1 and %d.\n' "$n"
+    done
+}
+
+# ── Preflight ─────────────────────────────────────────────────────────────
+
+for _cmd in virsh virt-install qemu-img xorriso curl; do
+    command -v "$_cmd" &>/dev/null || {
+        printf 'ERROR: "%s" is required but not installed.\n' "$_cmd" >&2
+        exit 1
+    }
 done
 
-# -- 5. Disk Size (always GB) -------------------------------------------------
-echo ""
-echo "Select disk size:"
-select DISKOPT in \
-  "10"   \
-  "20"   \
-  "40"   \
-  "60"   \
-  "80"   \
-  "100"  \
-  "200"  \
-  "500"  \
-  "1000" \
-  "Custom"; do
-  case $DISKOPT in
-    "Custom")
-      read -rp "  Disk size (GB): " DISK
-      DISK="${DISK//[^0-9]/}"
-      break ;;
-    *)
-      DISK="$DISKOPT"
-      break ;;
-  esac
+systemctl is-active --quiet libvirtd || {
+    printf 'ERROR: libvirtd is not running.\n' >&2
+    printf '  Start it with: systemctl start libvirtd\n' >&2
+    exit 1
+}
+
+# ── Header ────────────────────────────────────────────────────────────────
+
+printf '\n'
+__top
+__row "KVM VM Creator"
+__row "Host arch: ${QEMU_WIZARD_ARCH}"
+__bot
+printf '\n'
+
+# ── 1. VM Name ────────────────────────────────────────────────────────────
+
+while true; do
+    read -rp "VM name: " QEMU_WIZARD_VMNAME
+    QEMU_WIZARD_VMNAME="${QEMU_WIZARD_VMNAME// /-}"
+    if [[ -z "$QEMU_WIZARD_VMNAME" ]]; then
+        printf '  Name cannot be empty.\n'
+    elif virsh dominfo "$QEMU_WIZARD_VMNAME" &>/dev/null 2>&1; then
+        printf '  "%s" already exists — pick another name.\n' "$QEMU_WIZARD_VMNAME"
+    else
+        break
+    fi
 done
 
-# -- 6. Networking ------------------------------------------------------------
-echo ""
-echo "Which network setup?"
-select NET in \
-  "NAT (default)" \
-  "Bridge (br0)" \
-  "Isolated (no internet)"; do
-  case $NET in
-    "NAT"*)      NETWORK="network=default,model=virtio";  break ;;
-    "Bridge"*)   NETWORK="bridge=br0,model=virtio";       break ;;
-    "Isolated"*) NETWORK="network=isolated,model=virtio"; break ;;
-  esac
-done
+# ── 2. Distro ─────────────────────────────────────────────────────────────
 
-# -- Summary + confirm --------------------------------------------------------
-echo ""
-echo "+----------------------------------------------+"
-printf "| %-44s |\n" "VM Summary"
-echo "+----------------------------------------------+"
-printf "| %-14s %-29s |\n" "Name:"      "$VMNAME"
-printf "| %-14s %-29s |\n" "Distro:"    "$DISTRO $VERSION"
-printf "| %-14s %-29s |\n" "vCPUs:"     "$VCPUS"
-printf "| %-14s %-29s |\n" "RAM:"       "${RAM}MB"
-printf "| %-14s %-29s |\n" "Disk:"      "${DISK}GB"
-printf "| %-14s %-29s |\n" "Network:"   "$NET"
-echo "+----------------------------------------------+"
-read -rp "Proceed? [y/N] " CONFIRM
-[[ "${CONFIRM,,}" != "y" ]] && echo "Aborted." && exit 0
+__menu "Select distro" \
+    "AlmaLinux" \
+    "Debian" \
+    "Ubuntu"
+QEMU_WIZARD_DISTRO="$MENU_RESULT"
 
-# -- Download base image (skip if cached) ------------------------------------
-BASE_IMG="${IMGDIR}/${IMGFILE}"
-if [[ -f "$BASE_IMG" ]]; then
-  echo "Using cached image: ${BASE_IMG}"
+# ── 3. Version ────────────────────────────────────────────────────────────
+
+case "$QEMU_WIZARD_DISTRO" in
+    AlmaLinux)
+        # AlmaLinux cloud image URLs use the native arch string (x86_64 / aarch64)
+        __menu "AlmaLinux version" "8" "9" "10"
+        QEMU_WIZARD_VERSION="$MENU_RESULT"
+
+        QEMU_WIZARD_BASE_URL="https://repo.almalinux.org/almalinux/${QEMU_WIZARD_VERSION}/cloud/${QEMU_WIZARD_ARCH}/images"
+
+        QEMU_WIZARD_IMGFILE=$(curl -q -LSsf "${QEMU_WIZARD_BASE_URL}/" \
+            | grep -oE -- "AlmaLinux-${QEMU_WIZARD_VERSION}-GenericCloud-[0-9.]+-[0-9]+\\.${QEMU_WIZARD_ARCH}\\.qcow2" \
+            | sort -V | tail -1)
+
+        if [[ -z "${QEMU_WIZARD_IMGFILE:-}" ]]; then
+            printf 'ERROR: No AlmaLinux %s image found at %s\n' \
+                "$QEMU_WIZARD_VERSION" "$QEMU_WIZARD_BASE_URL" >&2
+            exit 1
+        fi
+
+        QEMU_WIZARD_IMG_URL="${QEMU_WIZARD_BASE_URL}/${QEMU_WIZARD_IMGFILE}"
+
+        case "$QEMU_WIZARD_VERSION" in
+            8)  QEMU_WIZARD_OS_VARIANT="almalinux8" ;;
+            9)  QEMU_WIZARD_OS_VARIANT="almalinux9" ;;
+            # AlmaLinux 10 may not yet be in osinfo-db; auto-detect
+            10) QEMU_WIZARD_OS_VARIANT="detect=on,require=off" ;;
+        esac
+        ;;
+
+    Debian)
+        # Debian cloud images use CLOUD_ARCH (amd64 / arm64)
+        __menu "Debian version" \
+            "11  Bullseye" \
+            "12  Bookworm" \
+            "13  Trixie"
+        QEMU_WIZARD_VERSION="$MENU_RESULT"
+
+        case "$QEMU_WIZARD_VERSION" in
+            "11"*)
+                QEMU_WIZARD_OS_VARIANT="debian11"
+                QEMU_WIZARD_CODENAME="bullseye"
+                QEMU_WIZARD_DEBVER="11"
+                ;;
+            "12"*)
+                QEMU_WIZARD_OS_VARIANT="debian12"
+                QEMU_WIZARD_CODENAME="bookworm"
+                QEMU_WIZARD_DEBVER="12"
+                ;;
+            "13"*)
+                # Debian 13 Trixie may not yet be in osinfo-db; auto-detect
+                QEMU_WIZARD_OS_VARIANT="detect=on,require=off"
+                QEMU_WIZARD_CODENAME="trixie"
+                QEMU_WIZARD_DEBVER="13"
+                ;;
+        esac
+
+        QEMU_WIZARD_IMGFILE="debian-${QEMU_WIZARD_DEBVER}-genericcloud-${QEMU_WIZARD_CLOUD_ARCH}.qcow2"
+        QEMU_WIZARD_IMG_URL="https://cloud.debian.org/images/cloud/${QEMU_WIZARD_CODENAME}/latest/${QEMU_WIZARD_IMGFILE}"
+        ;;
+
+    Ubuntu)
+        # Ubuntu cloud images use CLOUD_ARCH (amd64 / arm64); accessed via releases/ path
+        __menu "Ubuntu version" \
+            "20.04 LTS  Focal" \
+            "22.04 LTS  Jammy" \
+            "24.04 LTS  Noble" \
+            "26.04 LTS"
+        QEMU_WIZARD_VERSION="$MENU_RESULT"
+        # Extract "20.04", "22.04", etc. from the option string
+        QEMU_WIZARD_VER_SHORT="${QEMU_WIZARD_VERSION%% *}"
+
+        case "$QEMU_WIZARD_VER_SHORT" in
+            20.04) QEMU_WIZARD_OS_VARIANT="ubuntu20.04" ;;
+            22.04) QEMU_WIZARD_OS_VARIANT="ubuntu22.04" ;;
+            24.04) QEMU_WIZARD_OS_VARIANT="ubuntu24.04" ;;
+            # Ubuntu 26.04 may not yet be in osinfo-db; auto-detect
+            26.04) QEMU_WIZARD_OS_VARIANT="detect=on,require=off" ;;
+        esac
+
+        QEMU_WIZARD_IMGFILE="ubuntu-${QEMU_WIZARD_VER_SHORT}-server-cloudimg-${QEMU_WIZARD_CLOUD_ARCH}.img"
+        QEMU_WIZARD_IMG_URL="https://cloud-images.ubuntu.com/releases/${QEMU_WIZARD_VER_SHORT}/release/${QEMU_WIZARD_IMGFILE}"
+        ;;
+esac
+
+# ── 4. VM Specs ───────────────────────────────────────────────────────────
+
+__menu "VM specs" \
+    "Micro       1 vCPU    512 MB RAM" \
+    "Tiny        1 vCPU      1 GB RAM" \
+    "Small       2 vCPU      2 GB RAM" \
+    "Standard    2 vCPU      4 GB RAM" \
+    "Medium      4 vCPU      4 GB RAM" \
+    "Large       4 vCPU      8 GB RAM" \
+    "XLarge      8 vCPU      8 GB RAM" \
+    "2XLarge     8 vCPU     16 GB RAM" \
+    "4XLarge    16 vCPU     32 GB RAM" \
+    "Custom"
+
+# Extract tier name (first word) for the summary
+QEMU_WIZARD_SPECS_LABEL="${MENU_RESULT%%  *}"
+case "$MENU_RESULT" in
+    Micro*)    QEMU_WIZARD_VCPUS=1;  QEMU_WIZARD_RAM=512   ;;
+    Tiny*)     QEMU_WIZARD_VCPUS=1;  QEMU_WIZARD_RAM=1024  ;;
+    Small*)    QEMU_WIZARD_VCPUS=2;  QEMU_WIZARD_RAM=2048  ;;
+    Standard*) QEMU_WIZARD_VCPUS=2;  QEMU_WIZARD_RAM=4096  ;;
+    Medium*)   QEMU_WIZARD_VCPUS=4;  QEMU_WIZARD_RAM=4096  ;;
+    Large*)    QEMU_WIZARD_VCPUS=4;  QEMU_WIZARD_RAM=8192  ;;
+    XLarge*)   QEMU_WIZARD_VCPUS=8;  QEMU_WIZARD_RAM=8192  ;;
+    2XLarge*)  QEMU_WIZARD_VCPUS=8;  QEMU_WIZARD_RAM=16384 ;;
+    4XLarge*)  QEMU_WIZARD_VCPUS=16; QEMU_WIZARD_RAM=32768 ;;
+    Custom)
+        read -rp "  vCPUs: "    QEMU_WIZARD_VCPUS
+        read -rp "  RAM (MB): " QEMU_WIZARD_RAM
+        QEMU_WIZARD_SPECS_LABEL="Custom (${QEMU_WIZARD_VCPUS}c/${QEMU_WIZARD_RAM}MB)"
+        ;;
+esac
+
+# ── 5. Disk ───────────────────────────────────────────────────────────────
+
+__menu "Disk size (GB)" \
+    "10"  "20"  "40"  "60"  "80" \
+    "100" "200" "500" "1000" \
+    "Custom"
+
+if [[ "$MENU_RESULT" == "Custom" ]]; then
+    read -rp "  Disk size (GB): " QEMU_WIZARD_DISK
+    QEMU_WIZARD_DISK="${QEMU_WIZARD_DISK//[^0-9]/}"
 else
-  echo "Downloading ${IMGFILE}..."
-  curl -q -LSsf -o "$BASE_IMG" "$IMG_URL"
-  echo "Done: $(du -h "$BASE_IMG" | cut -f1)"
+    QEMU_WIZARD_DISK="$MENU_RESULT"
 fi
 
-# -- Create VM disk (thin overlay) -------------------------------------------
-VM_IMG="${IMGDIR}/${VMNAME}.qcow2"
-qemu-img create -f qcow2 -b "$BASE_IMG" -F qcow2 "$VM_IMG" "${DISK}G"
+# ── 6. Network ────────────────────────────────────────────────────────────
 
-# -- Cloud-init seed ISO ------------------------------------------------------
-SEED_ISO="${IMGDIR}/${VMNAME}-seed.iso"
-TMPD="$(mktemp -d "${TMPDIR:-/tmp}/scriptmgr-qemu-${VMNAME}-XXXXXX")"
-trap 'rm -rf "$TMPD"' EXIT
+__menu "Network setup" \
+    "NAT        default — internet via host NAT" \
+    "Bridge     br0 — VM joins the host LAN" \
+    "Isolated   host-only DHCP, no internet"
 
-cat > "${TMPD}/meta-data" <<EOF
-instance-id: ${VMNAME}
-local-hostname: ${VMNAME}
+# Extract tier name (first word) for the summary
+QEMU_WIZARD_NET_LABEL="${MENU_RESULT%%  *}"
+case "$MENU_RESULT" in
+    NAT*)      QEMU_WIZARD_NETWORK="network=default,model=virtio"  ;;
+    Bridge*)   QEMU_WIZARD_NETWORK="bridge=br0,model=virtio"       ;;
+    Isolated*) QEMU_WIZARD_NETWORK="network=isolated,model=virtio" ;;
+esac
+
+# ── Summary + confirm ─────────────────────────────────────────────────────
+
+printf '\n'
+__top
+__row "VM Summary"
+__mid
+__row "Name       : ${QEMU_WIZARD_VMNAME}"
+__row "Distro     : ${QEMU_WIZARD_DISTRO} ${QEMU_WIZARD_VERSION}"
+__row "Arch       : ${QEMU_WIZARD_ARCH}"
+__row "Specs      : ${QEMU_WIZARD_SPECS_LABEL}  (${QEMU_WIZARD_VCPUS} vCPU, ${QEMU_WIZARD_RAM} MB)"
+__row "Disk       : ${QEMU_WIZARD_DISK} GB"
+__row "Network    : ${QEMU_WIZARD_NET_LABEL}"
+__bot
+printf '\n'
+read -rp "Proceed? [y/N] " QEMU_WIZARD_CONFIRM
+[[ "${QEMU_WIZARD_CONFIRM,,}" != "y" ]] && { printf 'Aborted.\n'; exit 0; }
+
+# ── Download base image (skip if cached) ──────────────────────────────────
+
+QEMU_WIZARD_BASE_IMG="${QEMU_WIZARD_IMGDIR}/${QEMU_WIZARD_IMGFILE}"
+if [[ -f "$QEMU_WIZARD_BASE_IMG" ]]; then
+    printf '\nUsing cached image: %s\n' "$QEMU_WIZARD_BASE_IMG"
+else
+    printf '\nDownloading %s...\n' "$QEMU_WIZARD_IMGFILE"
+    # Drop -s to show progress bar (-#) for interactive download
+    curl -q -LS -# -f -o "$QEMU_WIZARD_BASE_IMG" "$QEMU_WIZARD_IMG_URL"
+    read -r QEMU_WIZARD_SIZE _ < <(du -h "$QEMU_WIZARD_BASE_IMG")
+    printf 'Saved: %s\n' "$QEMU_WIZARD_SIZE"
+fi
+
+# ── VM disk — thin overlay on top of base image ───────────────────────────
+
+QEMU_WIZARD_VM_IMG="${QEMU_WIZARD_IMGDIR}/${QEMU_WIZARD_VMNAME}.qcow2"
+qemu-img create -f qcow2 -b "$QEMU_WIZARD_BASE_IMG" -F qcow2 \
+    "$QEMU_WIZARD_VM_IMG" "${QEMU_WIZARD_DISK}G"
+
+# ── Cloud-init seed ISO ───────────────────────────────────────────────────
+
+QEMU_WIZARD_SEED_ISO="${QEMU_WIZARD_IMGDIR}/${QEMU_WIZARD_VMNAME}-seed.iso"
+QEMU_WIZARD_TMPD="$(mktemp -d "${TMPDIR:-/tmp}/scriptmgr-qemu-${QEMU_WIZARD_VMNAME}-XXXXXX")"
+trap 'rm -rf "$QEMU_WIZARD_TMPD"' EXIT
+
+cat > "${QEMU_WIZARD_TMPD}/meta-data" <<EOF
+instance-id: ${QEMU_WIZARD_VMNAME}
+local-hostname: ${QEMU_WIZARD_VMNAME}
 EOF
 
-cat > "${TMPD}/user-data" <<'EOF'
+cat > "${QEMU_WIZARD_TMPD}/user-data" <<'CLOUDINIT'
 #cloud-config
 chpasswd:
   list: |
-    root:almalinux
+    root:changeme
   expire: false
 ssh_pwauth: true
 disable_root: false
 runcmd:
   - growpart /dev/vda 1 || growpart /dev/vda 4 || true
   - xfs_growfs / || resize2fs /dev/vda1 || true
-EOF
+CLOUDINIT
 
 xorriso -as mkisofs \
-  -output "$SEED_ISO" \
-  -volid cidata \
-  -joliet -rock \
-  "${TMPD}/user-data" "${TMPD}/meta-data" 2>/dev/null
+    -output "$QEMU_WIZARD_SEED_ISO" \
+    -volid cidata \
+    -joliet -rock \
+    "${QEMU_WIZARD_TMPD}/user-data" "${QEMU_WIZARD_TMPD}/meta-data" 2>/dev/null
 
-# -- Create and start VM ------------------------------------------------------
-echo ""
-echo "Creating VM '${VMNAME}'..."
+# ── Create and start VM ───────────────────────────────────────────────────
+
+printf '\nCreating VM "%s"...\n' "$QEMU_WIZARD_VMNAME"
+
 virt-install \
-  --name        "$VMNAME" \
-  --memory      "$RAM" \
-  --vcpus       "$VCPUS" \
-  --disk        "${VM_IMG},device=disk,bus=virtio" \
-  --disk        "${SEED_ISO},device=cdrom" \
-  --os-variant  "$OS_VARIANT" \
-  --network     "$NETWORK" \
-  --graphics    vnc,listen=127.0.0.1 \
-  --console     pty,target_type=serial \
-  --import \
-  --noautoconsole \
-  --boot        hd
+    --name        "$QEMU_WIZARD_VMNAME" \
+    --memory      "$QEMU_WIZARD_RAM" \
+    --vcpus       "$QEMU_WIZARD_VCPUS" \
+    --disk        "${QEMU_WIZARD_VM_IMG},device=disk,bus=virtio" \
+    --disk        "${QEMU_WIZARD_SEED_ISO},device=cdrom" \
+    --os-variant  "$QEMU_WIZARD_OS_VARIANT" \
+    --network     "$QEMU_WIZARD_NETWORK" \
+    --graphics    vnc,listen=127.0.0.1 \
+    --console     pty,target_type=serial \
+    --import \
+    --noautoconsole \
+    --boot        hd
 
-# -- Wait for IP --------------------------------------------------------------
-echo "Waiting for IP address..."
-IP=""
-for i in $(seq 1 30); do
-  IP=$(virsh domifaddr "$VMNAME" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1)
-  [[ -n "$IP" ]] && break
-  sleep 2
+# ── Wait for IP address ───────────────────────────────────────────────────
+
+printf 'Waiting for IP address'
+QEMU_WIZARD_IP=""
+for ((iter = 1; iter <= 30; iter++)); do
+    QEMU_WIZARD_IP=$(virsh domifaddr "$QEMU_WIZARD_VMNAME" 2>/dev/null \
+        | awk '/ipv4/{split($4, a, "/"); print a[1]; exit}')
+    [[ -n "$QEMU_WIZARD_IP" ]] && break
+    printf '.'
+    sleep 2
 done
+printf '\n'
 
-echo ""
-echo "+----------------------------------------------+"
-printf "| VM '%-40s' |\n" "${VMNAME} is running"
-echo "+----------------------------------------------+"
-if [[ -n "$IP" ]]; then
-  printf "| %-14s %-29s |\n" "IP:"       "$IP"
-  printf "| %-14s %-29s |\n" "SSH:"      "ssh root@${IP}"
-  printf "| %-14s %-29s |\n" "Password:" "almalinux"
+# ── Result ────────────────────────────────────────────────────────────────
+
+printf '\n'
+__top
+__row "VM \"${QEMU_WIZARD_VMNAME}\" is running"
+__mid
+if [[ -n "$QEMU_WIZARD_IP" ]]; then
+    __row "IP         : ${QEMU_WIZARD_IP}"
+    __row "SSH        : ssh root@${QEMU_WIZARD_IP}"
+    __row "Password   : changeme"
 else
-  printf "| %-14s %-29s |\n" "IP:" "(run: virsh domifaddr ${VMNAME})"
+    __row "IP         : (run: virsh domifaddr ${QEMU_WIZARD_VMNAME})"
 fi
-printf "| %-14s %-29s |\n" "VNC:"      "virsh vncdisplay ${VMNAME}"
-printf "| %-14s %-29s |\n" "Console:"  "virsh console ${VMNAME}"
-echo "+----------------------------------------------+"
-printf "| %-14s %-29s |\n" "Start:"    "virsh start ${VMNAME}"
-printf "| %-14s %-29s |\n" "Stop:"     "virsh shutdown ${VMNAME}"
-printf "| %-14s %-29s |\n" "Force off:" "virsh destroy ${VMNAME}"
-printf "| %-14s %-29s |\n" "Delete:"   "virsh undefine ${VMNAME} --remove-all-storage"
-echo "+----------------------------------------------+"
+__row "VNC        : virsh vncdisplay ${QEMU_WIZARD_VMNAME}"
+__row "Console    : virsh console ${QEMU_WIZARD_VMNAME}"
+__mid
+__row "Start      : virsh start ${QEMU_WIZARD_VMNAME}"
+__row "Stop       : virsh shutdown ${QEMU_WIZARD_VMNAME}"
+__row "Force off  : virsh destroy ${QEMU_WIZARD_VMNAME}"
+__row "Delete     : virsh undefine ${QEMU_WIZARD_VMNAME} --remove-all-storage"
+__bot
+printf '\n'
