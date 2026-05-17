@@ -399,6 +399,7 @@ unix_sock_dir = "/var/run/libvirt"
 auth_unix_ro = "none"
 auth_unix_rw = "none"
 EOF
+            INSTALL_SH_CONF_CHANGED=1
         fi
     fi
 
@@ -428,16 +429,20 @@ NETXML
         virsh net-start default 2>/dev/null || true
     fi
 
-    # Restart libvirt to pick up config changes
-    __log_info "Restarting libvirt service..."
-    case "$INSTALL_SH_DISTRO_FAMILY" in
-        alpine)
-            rc-service libvirtd restart
-            ;;
-        *)
-            systemctl restart libvirtd
-            ;;
-    esac
+    # Restart libvirt only if the config was modified this run
+    if [ "${INSTALL_SH_CONF_CHANGED:-0}" = "1" ]; then
+        __log_info "Restarting libvirt service to apply config changes..."
+        case "$INSTALL_SH_DISTRO_FAMILY" in
+            alpine)
+                rc-service libvirtd restart
+                ;;
+            *)
+                systemctl restart libvirtd
+                ;;
+        esac
+    else
+        __log_info "libvirt config unchanged — skipping restart"
+    fi
 }
 
 # ---------------------------------------------------------------------------
