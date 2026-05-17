@@ -457,7 +457,7 @@ if [ -n "$ISO_PATH" ]; then
         --disk "${IMAGE_DIR}/${VM_NAME}.qcow2" \
         --cdrom "$ISO_PATH" \
         --network network=default \
-        --graphics none \
+        --graphics vnc,listen=127.0.0.1 \
         --console pty,target_type=serial \
         --boot uefi \
         --cpu host-passthrough \
@@ -472,7 +472,7 @@ else
         --disk "${IMAGE_DIR}/${VM_NAME}.qcow2" \
         --pxe \
         --network network=default \
-        --graphics none \
+        --graphics vnc,listen=127.0.0.1 \
         --console pty,target_type=serial \
         --boot uefi \
         --cpu host-passthrough \
@@ -481,7 +481,10 @@ else
         --noautoconsole
 fi
 
-printf 'VM %s created. Connect: virsh console %s\n' "$VM_NAME" "$VM_NAME"
+printf 'VM %s created.\n' "$VM_NAME"
+printf '  Serial console : virsh console %s\n' "$VM_NAME"
+printf '  VNC display    : virsh vncdisplay %s\n' "$VM_NAME"
+printf '  SSH tunnel     : ssh -L 5900:127.0.0.1:<port> user@host  then connect VNC to localhost:5900\n'
 SCRIPT
     chmod +x /usr/local/bin/qemu-create-vm
 
@@ -518,7 +521,7 @@ virt-install \
     --disk "$VM_DISK" \
     --disk "${SEED_ISO},device=cdrom,readonly=on" \
     --network network=default \
-    --graphics none \
+    --graphics vnc,listen=127.0.0.1 \
     --console pty,target_type=serial \
     --boot uefi \
     --cpu host-passthrough \
@@ -526,8 +529,11 @@ virt-install \
     --import \
     --noautoconsole
 
-printf 'VM %s created. Connect: virsh console %s\n' "$VM_NAME" "$VM_NAME"
-printf 'Remove seed ISO after first boot: virsh change-media %s sda --eject\n' "$VM_NAME"
+printf 'VM %s created.\n' "$VM_NAME"
+printf '  Serial console : virsh console %s\n' "$VM_NAME"
+printf '  VNC display    : virsh vncdisplay %s\n' "$VM_NAME"
+printf '  SSH tunnel     : ssh -L 5900:127.0.0.1:<port> user@host  then connect VNC to localhost:5900\n'
+printf '  Remove seed ISO after first boot: virsh change-media %s sda --eject\n' "$VM_NAME"
 SCRIPT
     chmod +x /usr/local/bin/qemu-cloudinit-vm
 
